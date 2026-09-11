@@ -3,7 +3,7 @@
 ## 1. Hardware Specifications & Components
 
 - **Microcontroller**: ESP32 Development Board (ESP32-WROOM / Generic Node)
-- **Display**: 0.96-inch SSD1306 I2C OLED Display (128x64 resolution, Address: `0x3C`)
+- **Display**: 2.43-inch SSD1309 I2C OLED Display (128x64 resolution, Address: `0x3C`)
 - **Input Device**: M5Stack CardKB V2 Unit (I2C interface, Address: `0x5F`)
 - **Storage**: Internal Flash partitioned with LittleFS file system for persistent logging (<span style="color: #B19CD9;">/packet_log.txt</span>)
 
