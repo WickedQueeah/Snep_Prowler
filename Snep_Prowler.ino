@@ -3,7 +3,6 @@
  * 9/11/2026
  */
 
-
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
@@ -45,6 +44,7 @@ enum AppMode {
   MODE_BLE_BEACON_SPAM,
   MODE_WIFI_SPAM,
   MODE_PACKET_MONITOR,
+  MODE_HANDSHAKE_SNIFFER,
   MODE_SAVED_LOGS,
   MODE_SAVED_DETAIL
 };
@@ -77,13 +77,20 @@ struct BLEDeviceInfo {
   String manufacturerName;
 };
 
+struct HandshakeInfo {
+  String info;
+  int channel;
+};
+
 std::vector<WiFiDeviceInfo> wifiList;
 std::vector<BLEDeviceInfo> bleList;
+std::vector<HandshakeInfo> handshakeList;
 std::vector<String> savedLogsList;
 int selectedIndex = 0;
 int logSelectedIndex = 0;
+int handshakeChannel = 1;
 
-// Menu configuration with WiFi Spammer positioned directly under Beacon Spam
+// Menu configuration updated to include EAPOL Sniffer
 const char* menuItems[] = {
   "1. IoT Terminal",
   "2. Wi-Fi Scanner",
@@ -93,9 +100,10 @@ const char* menuItems[] = {
   "6. BLE Scanner",
   "7. Beacon Spam",
   "8. WiFi Spammer",
-  "9. View Saved Logs"
+  "9. EAPOL Sniffer",
+  "10. View Saved Logs"
 };
-const int totalMenuItems = 9;
+const int totalMenuItems = 10;
 int menuSelectedIndex = 0;
 
 // Advanced IoT Terminal State Variables
@@ -143,7 +151,112 @@ int packetMonitorChannel = 1;
 unsigned long totalPacketsCaptured = 0;
 int currentActivityPct = 0;
 
-// Helper function to decode Bluetooth Company IDs into readable names
+// Forward declarations for UI functions
+void renderEspChatUI();
+void renderWiFiSpamUI();
+void renderPacketMonitorUI();
+void renderHandshakeUI();
+void showMenu();
+void handleInput(char key);
+char readCardKB();
+void runWiFiScan();
+void renderWiFiList();
+void renderWiFiDetail();
+void saveCurrentWiFiPacket();
+void runBLEScan();
+void renderBLEList();
+void renderBLEDetail();
+void saveCurrentBLEPacket();
+void loadSavedLogs();
+void renderSavedLogsUI();
+void renderSavedLogDetail();
+void deleteCurrentSavedLog();
+void clearSavedLogs();
+void initPacketMonitor();
+void updatePacketMonitorTick();
+void initTerminal();
+void renderTerminalUI();
+void handleTerminalInput(char c);
+void initBLEBeacon();
+void renderBLEBeaconUI();
+void handleBLEBeaconInput(char c);
+void initBLEBeaconSpam();
+void renderBLEBeaconSpamUI();
+void handleBLEBeaconSpamInput(char c);
+void runBeaconSpamTick();
+
+// Promiscuous callback capturing EAPOL frames with both Source (Tx) and Destination (Rx) MACs
+void wifi_promiscuous_sniffer_cb(void* buf, wifi_promiscuous_pkt_type_t type) {
+  if (type != WIFI_PKT_DATA) return;
+  
+  wifi_promiscuous_pkt_t *p = (wifi_promiscuous_pkt_t*)buf;
+  int pktlen = p->rx_ctrl.sig_len;
+  
+  if (pktlen < 36) return;
+  
+  uint8_t *payload = p->payload;
+  
+  for (int i = 0; i < pktlen - 8; i++) {
+    if (payload[i] == 0x88 && payload[i+1] == 0x8E) {
+      char dstMac[18];
+      sprintf(dstMac, "%02X:%02X:%02X:%02X:%02X:%02X", 
+              payload[4], payload[5], payload[6], 
+              payload[7], payload[8], payload[9]);
+              
+      char srcMac[18];
+      sprintf(srcMac, "%02X:%02X:%02X:%02X:%02X:%02X", 
+              payload[10], payload[11], payload[12], 
+              payload[13], payload[14], payload[15]);
+      
+      String eapolType = "EAPOL";
+      if (i + 8 < pktlen) {
+        uint8_t packetType = payload[i + 3];
+        if (packetType == 3) {
+          uint16_t keyInfo = ((uint16_t)payload[i + 7] << 8) | payload[i + 8];
+          bool keyAck = (keyInfo & 0x0080) != 0;
+          bool keyMic = (keyInfo & 0x0100) != 0;
+          bool keySecure = (keyInfo & 0x0200) != 0;
+          bool keyInstall = (keyInfo & 0x0040) != 0;
+          
+          if (keyAck && !keySecure && !keyMic) eapolType = "M1";
+          else if (!keyAck && keyMic && !keySecure) eapolType = "M2";
+          else if (keyAck && keySecure && keyInstall) eapolType = "M3";
+          else if (!keyAck && keyMic && keySecure) eapolType = "M4";
+          else eapolType = "Key";
+        }
+      }
+      
+      char fullInfo[64];
+      sprintf(fullInfo, "%s Src:%s Dst:%s Ch:%d", eapolType.c_str(), srcMac, dstMac, handshakeChannel);
+      
+      HandshakeInfo hs;
+      hs.info = String(fullInfo);
+      hs.channel = handshakeChannel;
+      
+      bool duplicate = false;
+      if (!handshakeList.empty() && handshakeList.back().info == hs.info) {
+        duplicate = true;
+      }
+      
+      if (!duplicate) {
+        handshakeList.push_back(hs);
+        if (handshakeList.size() > 25) handshakeList.erase(handshakeList.begin());
+        
+        File file = LittleFS.open("/packet_log.txt", FILE_APPEND);
+        if (file) {
+          file.println("[HANDSHAKE] " + hs.info);
+          file.close();
+        }
+        
+        if (currentMode == MODE_HANDSHAKE_SNIFFER) {
+          renderHandshakeUI();
+        }
+      }
+      break;
+    }
+  }
+}
+
 String getManufacturerName(String data) {
   if (data.length() < 2) return "None";
   uint16_t id = (uint8_t)data[0] | ((uint8_t)data[1] << 8);
@@ -168,7 +281,6 @@ String getManufacturerName(String data) {
   }
 }
 
-// Helper function to convert wifi_auth_mode_t to a descriptive string
 String getEncryptionName(wifi_auth_mode_t enc) {
   switch (enc) {
     case WIFI_AUTH_OPEN: return "Open";
@@ -184,10 +296,7 @@ String getEncryptionName(wifi_auth_mode_t enc) {
   }
 }
 
-// ESP-NOW Callbacks updated for ESP32 Arduino Core v3.x / IDF v5.x signatures
-void OnDataSent(const wifi_tx_info_t *info, esp_now_send_status_t status) {
-  // Transmission status handled quietly
-}
+void OnDataSent(const wifi_tx_info_t *info, esp_now_send_status_t status) {}
 
 void OnDataRecv(const esp_now_recv_info *info, const uint8_t *incomingData, int len) {
   char buf[65];
@@ -259,7 +368,6 @@ void renderEspChatUI() {
   display.println(espChatInput.substring(0, 18));
   
   display.setCursor(0, 56);
-  // Spaces removed between command keys as requested
   display.print(F("[`]Ch[+]Sc[-]Sc[Ent]Snd"));
   display.display();
 }
@@ -328,7 +436,6 @@ void handleEspChatInput(char c) {
   }
 }
 
-// --- WiFi Spammer Implementation ---
 void initWiFiSpam() {
   wifiSpamCounter = 0;
   wifiSpamChannel = 1;
@@ -385,16 +492,13 @@ void runWiFiSpamTick() {
 
   memset(packet, 0, sizeof(packet));
   
-  // Frame Control: Management frame, Beacon (0x80, 0x00)
   packet[0] = 0x80;
   packet[1] = 0x00;
   packet[2] = 0x00;
   packet[3] = 0x00;
   
-  // Receiver Address (Broadcast)
   memset(&packet[4], 0xFF, 6);
   
-  // Source Address / BSSID (Randomized MAC)
   packet[10] = 0x00;
   packet[11] = 0x22;
   packet[12] = 0x33;
@@ -402,29 +506,23 @@ void runWiFiSpamTick() {
   packet[14] = (uint8_t)random(0, 256);
   packet[15] = (uint8_t)random(0, 256);
   
-  memcpy(&packet[16], &packet[10], 6); // BSSID
+  memcpy(&packet[16], &packet[10], 6);
 
-  // Sequence Control
   packet[22] = 0x00;
   packet[23] = 0x00;
 
-  // Timestamp (8 bytes, 0)
-  // Beacon Interval (2 bytes: 0x64, 0x00)
   packet[32] = 0x64;
   packet[33] = 0x00;
   
-  // Capabilities Information (2 bytes: 0x21, 0x04)
   packet[34] = 0x21;
   packet[35] = 0x04;
 
-  // Tagged parameters: SSID parameter set
   packet[36] = 0x00; 
   packet[37] = ssidLen; 
   memcpy(&packet[38], targetSSID.c_str(), ssidLen);
 
   int packetLen = 38 + ssidLen;
 
-  // Supported Rates tag
   packet[packetLen++] = 0x01;
   packet[packetLen++] = 0x08;
   packet[packetLen++] = 0x82; packet[packetLen++] = 0x84; 
@@ -437,6 +535,70 @@ void runWiFiSpamTick() {
 
   if (currentMode == MODE_WIFI_SPAM) {
     renderWiFiSpamUI();
+  }
+}
+
+void initHandshakeSniffer() {
+  handshakeList.clear();
+  WiFi.mode(WIFI_STA);
+  WiFi.disconnect();
+  
+  esp_wifi_set_promiscuous(false);
+  esp_wifi_set_promiscuous_rx_cb(&wifi_promiscuous_sniffer_cb);
+  esp_wifi_set_promiscuous(true);
+  esp_wifi_set_channel(handshakeChannel, WIFI_SECOND_CHAN_NONE);
+  
+  renderHandshakeUI();
+}
+
+void renderHandshakeUI() {
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.print(F("Handshakes (Ch:")); display.print(handshakeChannel); display.print(F(") ")); display.print(handshakeList.size()); display.println(F(""));
+  
+  if (handshakeList.empty()) {
+    display.println(F("\nListening for EAPOL..."));
+    display.println(F("Use [o/k] to change Ch"));
+  } else {
+    int maxLines = 3; // Reduced to 3 lines max to keep safe clearance above the footer
+    int startIdx = max(0, (int)handshakeList.size() - maxLines);
+    for (int i = startIdx; i < handshakeList.size(); ++i) {
+      display.print(F("> "));
+      display.println(handshakeList[i].info.substring(0, 20)); // Capped width to prevent text wrapping
+    }
+  }
+  
+  display.setCursor(0, 56);
+  display.print(F("[o/k]Ch [s]Save [q]Menu"));
+  display.display();
+}
+
+void handleHandshakeInput(char key) {
+  if (key == 'o' || key == 'O') {
+    handshakeChannel--;
+    if (handshakeChannel < 1) handshakeChannel = 13;
+    esp_wifi_set_channel(handshakeChannel, WIFI_SECOND_CHAN_NONE);
+    renderHandshakeUI();
+  } 
+  else if (key == 'k' || key == 'K') {
+    handshakeChannel++;
+    if (handshakeChannel > 13) handshakeChannel = 1;
+    esp_wifi_set_channel(handshakeChannel, WIFI_SECOND_CHAN_NONE);
+    renderHandshakeUI();
+  }
+  else if (key == 's' || key == 'S') {
+    if (!handshakeList.empty()) {
+      File file = LittleFS.open("/packet_log.txt", FILE_APPEND);
+      if (file) {
+        file.println("[EXPORT] " + handshakeList.back().info);
+        file.close();
+      }
+      display.setCursor(0, 46);
+      display.print(F("Saved Handshake!"));
+      display.display();
+      delay(800);
+      renderHandshakeUI();
+    }
   }
 }
 
@@ -459,14 +621,13 @@ void setup() {
 
   BLEDevice::init("Snep Prowler");
   pBLEScan = BLEDevice::getScan();
-  pBLEScan->setActiveScan(false); // Passive BLE scanning
+  pBLEScan->setActiveScan(false);
   pBLEScan->setInterval(100);
   pBLEScan->setWindow(99);
 
   pAdvertising = BLEDevice::getAdvertising();
   pAdvertising->setScanResponse(true);
 
-  // Initialize packet graph buffer
   for(int i = 0; i < 128; i++) {
     packetGraphData[i] = 0;
   }
@@ -475,7 +636,6 @@ void setup() {
 }
 
 void loop() {
-  // Continuously poll bi-directional incoming serial data in background
   while (Serial.available()) {
     String incoming = Serial.readStringUntil('\n');
     incoming.trim();
@@ -483,7 +643,6 @@ void loop() {
       serialRxList.push_back(incoming);
       if (serialRxList.size() > 50) serialRxList.erase(serialRxList.begin());
       
-      // Automatically log incoming serial responses to flash
       File file = LittleFS.open("/packet_log.txt", FILE_APPEND);
       if (file) {
         file.println("[RX] " + incoming);
@@ -492,7 +651,6 @@ void loop() {
     }
   }
 
-  // Handle active beacon spamming if enabled
   if (currentMode == MODE_BLE_BEACON_SPAM && isBeaconSpamming) {
     static unsigned long lastSpamTime = 0;
     if (millis() - lastSpamTime > 300) {
@@ -501,7 +659,6 @@ void loop() {
     }
   }
 
-  // Handle WiFi Spammer if enabled
   if (currentMode == MODE_WIFI_SPAM && isWifiSpamming) {
     static unsigned long lastWiFiSpamTime = 0;
     if (millis() - lastWiFiSpamTime > 100) {
@@ -510,7 +667,6 @@ void loop() {
     }
   }
 
-  // Handle Packet Monitor real-time ticker
   if (currentMode == MODE_PACKET_MONITOR) {
     if (millis() - lastMonitorUpdate > 150) {
       lastMonitorUpdate = millis();
@@ -538,6 +694,9 @@ void loop() {
         }
         if (isWifiSpamming) {
           isWifiSpamming = false;
+        }
+        if (currentMode == MODE_HANDSHAKE_SNIFFER) {
+          esp_wifi_set_promiscuous(false);
         }
         currentMode = MODE_MENU;
         showMenu();
@@ -620,6 +779,9 @@ void handleInput(char key) {
           currentMode = MODE_WIFI_SPAM;
           initWiFiSpam();
         } else if (menuSelectedIndex == 8) {
+          currentMode = MODE_HANDSHAKE_SNIFFER;
+          initHandshakeSniffer();
+        } else if (menuSelectedIndex == 9) {
           currentMode = MODE_SAVED_LOGS;
           loadSavedLogs();
         }
@@ -688,19 +850,23 @@ void handleInput(char key) {
       handleBLEBeaconSpamInput(key);
       break;
 
+    case MODE_HANDSHAKE_SNIFFER:
+      handleHandshakeInput(key);
+      break;
+
     case MODE_PACKET_MONITOR:
       if (key == 'o' || key == 'O') {
         if (packetMonitorChannel > 1) {
           packetMonitorChannel--;
           esp_wifi_set_channel(packetMonitorChannel, WIFI_SECOND_CHAN_NONE);
-          totalPacketsCaptured = 0; // Reset packet count on channel change
+          totalPacketsCaptured = 0;
           renderPacketMonitorUI();
         }
       } else if (key == 'k' || key == 'K') {
         if (packetMonitorChannel < 13) {
           packetMonitorChannel++;
           esp_wifi_set_channel(packetMonitorChannel, WIFI_SECOND_CHAN_NONE);
-          totalPacketsCaptured = 0; // Reset packet count on channel change
+          totalPacketsCaptured = 0;
           renderPacketMonitorUI();
         }
       }
@@ -1018,7 +1184,6 @@ void clearSavedLogs() {
   renderSavedLogsUI();
 }
 
-// --- Packet Monitor Implementation ---
 void initPacketMonitor() {
   WiFi.mode(WIFI_STA);
   WiFi.disconnect();
@@ -1070,7 +1235,6 @@ void renderPacketMonitorUI() {
   display.display();
 }
 
-// --- IoT Terminal Implementation ---
 void initTerminal() {
   terminalInput = "";
   historyIdx = -1;
@@ -1240,7 +1404,6 @@ void handleTerminalInput(char c) {
   }
 }
 
-// --- BLE Beacon Implementation ---
 void initBLEBeacon() {
   bleBeaconInput = "";
   renderBLEBeaconUI();
@@ -1289,7 +1452,6 @@ void handleBLEBeaconInput(char c) {
   }
 }
 
-// --- BLE Beacon Spam Implementation ---
 void initBLEBeaconSpam() {
   renderBLEBeaconSpamUI();
 }
