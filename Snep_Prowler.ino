@@ -46,7 +46,10 @@ enum AppMode {
   MODE_PACKET_MONITOR,
   MODE_HANDSHAKE_SNIFFER,
   MODE_SAVED_LOGS,
-  MODE_SAVED_DETAIL
+  MODE_SAVED_DETAIL,
+  MODE_NOTEPAD_LIST,
+  MODE_NOTEPAD_DETAIL,
+  MODE_NOTEPAD_NEW
 };
 
 enum TerminalSubMode { 
@@ -86,27 +89,33 @@ std::vector<WiFiDeviceInfo> wifiList;
 std::vector<BLEDeviceInfo> bleList;
 std::vector<HandshakeInfo> handshakeList;
 std::vector<String> savedLogsList;
+std::vector<String> notepadList;
+
 int selectedIndex = 0;
 int logSelectedIndex = 0;
+int notepadSelectedIndex = 0;
 int handshakeChannel = 1;
 
-// Menu configuration updated to include EAPOL Sniffer
+String notepadInput = "";
+
+// Menu configuration 
 const char* menuItems[] = {
   "1. IoT Terminal",
-  "2. Wi-Fi Scanner",
-  "3. Packet Monitor",
-  "4. ESP Now Chat",
-  "5. BLE Beacon",
-  "6. BLE Scanner",
-  "7. Beacon Spam",
+  "2. ESPNow Chat",
+  "3. Tiny Notepad",
+  "4. View Scan Logs",
+  "5. Packet Monitor",
+  "6. WiFi Scanner",
+  "7. EAPOL Sniffer",
   "8. WiFi Spammer",
-  "9. EAPOL Sniffer",
-  "10. View Saved Logs"
+  "9. BLE Beacon",
+  "10. BLE Scanner",
+  "11. BLE spammer"
 };
-const int totalMenuItems = 10;
+const int totalMenuItems = 11;
 int menuSelectedIndex = 0;
 
-// Advanced IoT Terminal State Variables
+// Advanced IoT Terminal Variables
 String terminalInput = "";
 int messageCount = 0;
 bool jsonMode = false;
@@ -126,7 +135,7 @@ std::vector<String> macroList = {
 };
 int macroSelectedIndex = 0;
 
-// ESP-NOW Chat State Variables
+// ESP-NOW Chat Variables
 std::vector<String> espChatMessages;
 String espChatInput = "";
 int chatScrollIdx = 0;
@@ -139,12 +148,12 @@ bool isBeaconBroadcasting = false;
 bool isBeaconSpamming = false;
 int spamCounter = 0;
 
-// WiFi Spammer State Variables
+// WiFi Spammer Variables
 bool isWifiSpamming = false;
 int wifiSpamCounter = 0;
 int wifiSpamChannel = 1;
 
-// Packet Monitor Graph, Channel & Detailed Stats State Variables
+// Packet Monitor Graph, Channel & Detailed Stats Variables
 int packetGraphData[128];
 unsigned long lastMonitorUpdate = 0;
 int packetMonitorChannel = 1;
@@ -172,6 +181,13 @@ void renderSavedLogsUI();
 void renderSavedLogDetail();
 void deleteCurrentSavedLog();
 void clearSavedLogs();
+void loadNotepadEntries();
+void renderNotepadListUI();
+void renderNotepadDetailUI();
+void renderNotepadNewUI();
+void saveNewNotepadEntry(String text);
+void deleteCurrentNotepadEntry();
+void clearNotepadEntries();
 void initPacketMonitor();
 void updatePacketMonitorTick();
 void initTerminal();
@@ -560,11 +576,11 @@ void renderHandshakeUI() {
     display.println(F("\nListening for EAPOL..."));
     display.println(F("Use [o/k] to change Ch"));
   } else {
-    int maxLines = 3; // Reduced to 3 lines max to keep safe clearance above the footer
+    int maxLines = 3; 
     int startIdx = max(0, (int)handshakeList.size() - maxLines);
     for (int i = startIdx; i < handshakeList.size(); ++i) {
       display.print(F("> "));
-      display.println(handshakeList[i].info.substring(0, 20)); // Capped width to prevent text wrapping
+      display.println(handshakeList[i].info.substring(0, 20)); 
     }
   }
   
@@ -687,6 +703,9 @@ void loop() {
       } else if (currentMode == MODE_SAVED_DETAIL) {
         currentMode = MODE_SAVED_LOGS;
         renderSavedLogsUI();
+      } else if (currentMode == MODE_NOTEPAD_DETAIL || currentMode == MODE_NOTEPAD_NEW) {
+        currentMode = MODE_NOTEPAD_LIST;
+        loadNotepadEntries();
       } else {
         if (isBeaconSpamming) {
           isBeaconSpamming = false;
@@ -758,32 +777,35 @@ void handleInput(char key) {
           termSubMode = TERM_SEND;
           initTerminal();
         } else if (menuSelectedIndex == 1) {
-          currentMode = MODE_WIFI_LIST;
-          runWiFiScan();
-        } else if (menuSelectedIndex == 2) {
-          currentMode = MODE_PACKET_MONITOR;
-          initPacketMonitor();
-        } else if (menuSelectedIndex == 3) {
           currentMode = MODE_ESP_CHAT;
           initEspChat();
+        } else if (menuSelectedIndex == 2) {
+          currentMode = MODE_NOTEPAD_LIST;
+          loadNotepadEntries();
+        } else if (menuSelectedIndex == 3) {
+          currentMode = MODE_SAVED_LOGS;
+          loadSavedLogs();
         } else if (menuSelectedIndex == 4) {
-          currentMode = MODE_BLE_BEACON;
-          initBLEBeacon();
+          currentMode = MODE_PACKET_MONITOR;
+          initPacketMonitor();
         } else if (menuSelectedIndex == 5) {
-          currentMode = MODE_BLE_LIST;
-          runBLEScan();
+          currentMode = MODE_WIFI_LIST;
+          runWiFiScan();
         } else if (menuSelectedIndex == 6) {
-          currentMode = MODE_BLE_BEACON_SPAM;
-          initBLEBeaconSpam();
+          currentMode = MODE_HANDSHAKE_SNIFFER;
+          initHandshakeSniffer();
         } else if (menuSelectedIndex == 7) {
           currentMode = MODE_WIFI_SPAM;
           initWiFiSpam();
         } else if (menuSelectedIndex == 8) {
-          currentMode = MODE_HANDSHAKE_SNIFFER;
-          initHandshakeSniffer();
+          currentMode = MODE_BLE_BEACON;
+          initBLEBeacon();
         } else if (menuSelectedIndex == 9) {
-          currentMode = MODE_SAVED_LOGS;
-          loadSavedLogs();
+          currentMode = MODE_BLE_LIST;
+          runBLEScan();
+        } else if (menuSelectedIndex == 10) {
+          currentMode = MODE_BLE_BEACON_SPAM;
+          initBLEBeaconSpam();
         }
       }
       break;
@@ -892,6 +914,55 @@ void handleInput(char key) {
     case MODE_SAVED_DETAIL:
       if (key == 'c' || key == 'C') {
         deleteCurrentSavedLog();
+      }
+      break;
+
+    case MODE_NOTEPAD_LIST:
+      if ((key == 'o' || key == 'O') && notepadSelectedIndex > 0) {
+        notepadSelectedIndex--;
+        renderNotepadListUI();
+      } else if ((key == 'k' || key == 'K') && notepadSelectedIndex < (int)notepadList.size() - 1) {
+        notepadSelectedIndex++;
+        renderNotepadListUI();
+      } else if (key == '\r' || key == '\n') {
+        if (!notepadList.empty()) {
+          currentMode = MODE_NOTEPAD_DETAIL;
+          renderNotepadDetailUI();
+        }
+      } else if (key == 'n' || key == 'N') {
+        notepadInput = "";
+        currentMode = MODE_NOTEPAD_NEW;
+        renderNotepadNewUI();
+      } else if (key == 'c' || key == 'C') {
+        clearNotepadEntries();
+      }
+      break;
+
+    case MODE_NOTEPAD_DETAIL:
+      if (key == 'c' || key == 'C') {
+        deleteCurrentNotepadEntry();
+      }
+      break;
+
+    case MODE_NOTEPAD_NEW:
+      if (key == '\r' || key == '\n') {
+        if (notepadInput.length() > 0) {
+          saveNewNotepadEntry(notepadInput);
+          display.setCursor(0, 48);
+          display.print(F("Note Saved!"));
+          display.display();
+          delay(800);
+          currentMode = MODE_NOTEPAD_LIST;
+          loadNotepadEntries();
+        }
+      } else if (key == 8 || key == 127) {
+        if (notepadInput.length() > 0) {
+          notepadInput.remove(notepadInput.length() - 1);
+        }
+        renderNotepadNewUI();
+      } else {
+        notepadInput += key;
+        renderNotepadNewUI();
       }
       break;
   }
@@ -1182,6 +1253,112 @@ void clearSavedLogs() {
   savedLogsList.clear();
   logSelectedIndex = 0;
   renderSavedLogsUI();
+}
+
+// Notepad Functions
+void loadNotepadEntries() {
+  notepadList.clear();
+  File file = LittleFS.open("/notepad.txt", FILE_READ);
+  if (file) {
+    while (file.available()) {
+      String line = file.readStringUntil('\n');
+      line.trim();
+      if (line.length() > 0) {
+        notepadList.push_back(line);
+      }
+    }
+    file.close();
+  }
+  notepadSelectedIndex = 0;
+  renderNotepadListUI();
+}
+
+void renderNotepadListUI() {
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.print(F("Notepad (")); display.print(notepadList.size()); display.println(F(")"));
+  
+  if (notepadList.empty()) {
+    display.println(F("\nNo notes found."));
+    display.println(F("Press 'n' to add note"));
+  } else {
+    int maxLines = 5;
+    int startIdx = notepadSelectedIndex - 2;
+    if (startIdx < 0) startIdx = 0;
+    if (startIdx + maxLines > (int)notepadList.size()) {
+      startIdx = max(0, (int)notepadList.size() - maxLines);
+    }
+    int endIdx = min((int)notepadList.size(), startIdx + maxLines);
+    
+    for (int i = startIdx; i < endIdx; ++i) {
+      if (i == notepadSelectedIndex) display.print(F(">"));
+      else display.print(F(" "));
+      display.println(notepadList[i].substring(0, 19));
+    }
+  }
+  display.setCursor(0, 56);
+  display.print(F("[o/k]Sc [n]New [q]Menu"));
+  display.display();
+}
+
+void renderNotepadDetailUI() {
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println(F("--- Note Detail ---"));
+  if (!notepadList.empty()) {
+    display.println(notepadList[notepadSelectedIndex]);
+  }
+  display.setCursor(0, 56);
+  display.print(F("[c]Del       [q]Back"));
+  display.display();
+}
+
+void renderNotepadNewUI() {
+  display.clearDisplay();
+  display.setCursor(0, 0);
+  display.println(F("=== New Note ==="));
+  display.print(F("> ")); display.println(notepadInput.substring(0, 50));
+  display.setCursor(0, 56);
+  display.print(F("[Enter]Save  [q]Back"));
+  display.display();
+}
+
+void saveNewNotepadEntry(String text) {
+  File file = LittleFS.open("/notepad.txt", FILE_APPEND);
+  if (file) {
+    file.println(text);
+    file.close();
+  }
+}
+
+void deleteCurrentNotepadEntry() {
+  if (notepadList.empty()) return;
+  
+  notepadList.erase(notepadList.begin() + notepadSelectedIndex);
+  
+  File file = LittleFS.open("/notepad.txt", FILE_WRITE);
+  if (file) {
+    for (const String& line : notepadList) {
+      file.println(line);
+    }
+    file.close();
+  }
+  
+  if (notepadSelectedIndex >= notepadList.size() && notepadSelectedIndex > 0) {
+    notepadSelectedIndex--;
+  }
+  
+  currentMode = MODE_NOTEPAD_LIST;
+  renderNotepadListUI();
+}
+
+void clearNotepadEntries() {
+  if (LittleFS.exists("/notepad.txt")) {
+    LittleFS.remove("/notepad.txt");
+  }
+  notepadList.clear();
+  notepadSelectedIndex = 0;
+  renderNotepadListUI();
 }
 
 void initPacketMonitor() {
